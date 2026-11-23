@@ -8,6 +8,7 @@ namespace WinRtspPlayer.Client;
 public sealed class EditCameraDialog : Form
 {
     private readonly CameraConfig? _existingCamera;
+    private readonly Func<int, string?>? _validateSlot;
 
     private readonly TextBox _rtspUrlTextBox;
     private readonly TextBox _nameTextBox;
@@ -22,9 +23,14 @@ public sealed class EditCameraDialog : Form
     private readonly CheckBox _hardDecodeCheckBox;
     private readonly CheckBox _autoPlayCheckBox;
 
-    public EditCameraDialog(CameraConfig? existingCamera, string existingPassword, int defaultSlot)
+    public EditCameraDialog(
+        CameraConfig? existingCamera,
+        string existingPassword,
+        int defaultSlot,
+        Func<int, string?>? validateSlot = null)
     {
         _existingCamera = existingCamera;
+        _validateSlot = validateSlot;
 
         Text = existingCamera is null ? "Add Camera" : $"Edit Camera (Slot {existingCamera.Slot})";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -32,7 +38,7 @@ public sealed class EditCameraDialog : Form
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(500, 395);
+        ClientSize = new Size(520, 445);
 
         var root = new TableLayoutPanel
         {
@@ -41,13 +47,13 @@ public sealed class EditCameraDialog : Form
             ColumnCount = 2,
             RowCount = 12
         };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 115f));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120f));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         for (int i = 0; i < 11; i++)
         {
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 30f));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32f));
         }
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f));
 
         // Row 0: Quick RTSP URL parser
         _rtspUrlTextBox = new TextBox
@@ -275,6 +281,15 @@ public sealed class EditCameraDialog : Form
         {
             MessageBox.Show(this, "Camera name must not be empty.", "Invalid Camera Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             _nameTextBox.Focus();
+            return;
+        }
+
+        int selectedSlot = (int)_slotNumeric.Value;
+        string? slotError = _validateSlot?.Invoke(selectedSlot);
+        if (!string.IsNullOrWhiteSpace(slotError))
+        {
+            MessageBox.Show(this, slotError, "Invalid Camera Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _slotNumeric.Focus();
             return;
         }
 

@@ -30,6 +30,8 @@ public sealed class McpSettingsDialog : Form
     private readonly Button _saveButton;
     private readonly Button _cancelButton;
 
+    private bool _isSaving;
+
     public McpSettingsDialog(CameraStore store, OAuthAuthStore authStore, McpServerHost mcpHost)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -251,8 +253,24 @@ public sealed class McpSettingsDialog : Form
         LoadCredentials(updated);
     }
 
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (_isSaving)
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        base.OnFormClosing(e);
+    }
+
     private async void OnSaveClick(object? sender, EventArgs e)
     {
+        if (_isSaving)
+        {
+            return;
+        }
+
         string rawBaseUrl = _publicBaseUrlTextBox.Text.Trim().TrimEnd('/');
         string? normalizedBaseUrl = string.IsNullOrEmpty(rawBaseUrl) ? null : rawBaseUrl;
         if (normalizedBaseUrl is not null)
@@ -276,6 +294,8 @@ public sealed class McpSettingsDialog : Form
         bool needsRestart = newPort != _initialPort || !_mcpHost.IsRunning;
         if (needsRestart)
         {
+            bool wasRunning = _mcpHost.IsRunning;
+            _isSaving = true;
             SetUiBusy(true);
             try
             {
@@ -283,6 +303,24 @@ public sealed class McpSettingsDialog : Form
             }
             catch (Exception ex)
             {
+                if (wasRunning && newPort != _initialPort)
+                {
+                    try
+                    {
+                        await _mcpHost.RestartAsync(_initialPort);
+                    }
+                    catch
+                    {
+                        // Best-effort restore of previous listening port.
+                    }
+                }
+
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                _isSaving = false;
                 RefreshStatusLabel();
                 SetUiBusy(false);
                 MessageBox.Show(
@@ -291,6 +329,19 @@ public sealed class McpSettingsDialog : Form
                     "MCP Server Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+                return;
+            }
+            finally
+            {
+                _isSaving = false;
+                if (!IsDisposed)
+                {
+                    SetUiBusy(false);
+                }
+            }
+
+            if (IsDisposed)
+            {
                 return;
             }
         }

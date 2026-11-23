@@ -35,8 +35,9 @@ public static class OAuthEndpoints
             forwardedHost = null;
         }
 
+        string? requestHost = req.Host.HasValue && IsValidHeaderHost(req.Host.Value) ? req.Host.Value : null;
         string effectiveScheme = scheme ?? (string.IsNullOrEmpty(req.Scheme) ? "http" : req.Scheme);
-        string effectiveHost = forwardedHost ?? (req.Host.HasValue ? req.Host.Value : "127.0.0.1");
+        string effectiveHost = forwardedHost ?? requestHost ?? "127.0.0.1";
         return $"{effectiveScheme}://{effectiveHost}".TrimEnd('/');
     }
 
@@ -391,7 +392,7 @@ public static class OAuthEndpoints
     {
         foreach (char ch in host)
         {
-            if (char.IsWhiteSpace(ch) || ch is '/' or '\\' or '?' or '#' or '@')
+            if (char.IsWhiteSpace(ch) || char.IsControl(ch) || ch is '"' or '/' or '\\' or '?' or '#' or '@')
             {
                 return false;
             }

@@ -432,6 +432,11 @@ public static class McpEndpoint
             return TextToolError(error!);
         }
 
+        if (clearPassword == true && !string.IsNullOrEmpty(password))
+        {
+            return TextToolError("Cannot specify both a non-empty 'password' and 'clear_password: true'.");
+        }
+
         try
         {
             CameraConfig updated = store.UpdateCamera(
@@ -624,7 +629,7 @@ public static class McpEndpoint
         }
 
         string trimmed = (values[0] ?? string.Empty).Trim();
-        if (string.IsNullOrEmpty(trimmed) || trimmed.Any(char.IsControl))
+        if (string.IsNullOrEmpty(trimmed) || trimmed.Any(static c => c is < '\x21' or > '\x7E'))
         {
             return null;
         }

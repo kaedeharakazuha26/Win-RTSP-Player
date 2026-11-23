@@ -75,8 +75,8 @@ public class SmokeTests
 
         TypeDefinition nativeDllLoader = FindType(metadata, "EasyPlayerNetSDK", "NativeDllLoader");
         MethodDefinition? configureMethod = nativeDllLoader.GetMethods()
-            .Select(h => metadata.GetMethodDefinition(h))
-            .FirstOrDefault(m => metadata.GetString(m.Name) == "ConfigureLibDirectory");
+            .Select(h => (MethodDefinition?)metadata.GetMethodDefinition(h))
+            .FirstOrDefault(m => m is { } def && metadata.GetString(def.Name) == "ConfigureLibDirectory");
 
         Assert.False(configureMethod is null, "NativeDllLoader.ConfigureLibDirectory must exist.");
         var configureSig = configureMethod.Value.DecodeSignature(new PrimitiveReturnTypeProvider(), genericContext: null);

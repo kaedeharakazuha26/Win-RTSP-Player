@@ -75,6 +75,23 @@ public sealed class OAuthEndpointsTests : IDisposable
         Assert.Equal(["authorization_code", "refresh_token"], asJson["grant_types_supported"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
         Assert.Equal(["S256"], asJson["code_challenge_methods_supported"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
         Assert.Equal(["client_secret_basic", "client_secret_post"], asJson["token_endpoint_auth_methods_supported"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
+
+        // 4. Malicious X-Forwarded-Host containing quotes or control characters is rejected and falls back to request host
+        configuredBaseUrl = null;
+        using var craftedReq = new HttpRequestMessage(HttpMethod.Get, "/.well-known/oauth-protected-resource");
+        craftedReq.Headers.TryAddWithoutValidation("X-Forwarded-Proto", "https");
+        craftedReq.Headers.TryAddWithoutValidation("X-Forwarded-Host", "evil.example.com\",realm=\"injected");
+        HttpResponseMessage craftedRes = await host.Client.SendAsync(craftedReq);
+        Assert.Equal(HttpStatusCode.OK, craftedRes.StatusCode);
+        JsonObject? craftedJson = JsonNode.Parse(await craftedRes.Content.ReadAsStringAsync())?.AsObject();
+        Assert.NotNull(craftedJson);
+        Assert.Equal("https://localhost/mcp", craftedJson["resource"]?.GetValue<string>());
+
+        var controlCtx = new DefaultHttpContext();
+        controlCtx.Request.Scheme = "https";
+        controlCtx.Request.Host = new HostString("evil.example.com\"");
+        controlCtx.Request.Headers["X-Forwarded-Host"] = "ctrl\u0007host.example.com";
+        Assert.Equal("https://127.0.0.1", OAuthEndpoints.ResolvePublicBaseUrl(controlCtx.Request, null));
     }
 
     [Fact]

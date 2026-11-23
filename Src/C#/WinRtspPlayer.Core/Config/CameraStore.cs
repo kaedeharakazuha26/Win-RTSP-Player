@@ -49,7 +49,7 @@ public sealed class CameraStore
                 {
                     string json = File.ReadAllText(_configPath, Utf8NoBom);
                     AppConfig? loaded = JsonSerializer.Deserialize<AppConfig>(json, JsonOptions);
-                    if (loaded is null)
+                    if (loaded is null || !TryNormalizeLoadedConfig(loaded))
                     {
                         BackupCorruptConfigLocked();
                         _config = new AppConfig();
@@ -57,7 +57,6 @@ public sealed class CameraStore
                     }
                     else
                     {
-                        NormalizeLoadedConfig(loaded);
                         _config = loaded;
                     }
                 }
@@ -479,12 +478,16 @@ public sealed class CameraStore
         }
 
         string tempPath = _configPath + ".tmp";
-        string json = JsonSerializer.Serialize(_config, JsonOptions);
-        File.WriteAllText(tempPath, json, Utf8NoBom);
+        using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+        {
+            JsonSerializer.Serialize(fs, _config, JsonOptions);
+            fs.Flush(flushToDisk: true);
+        }
+
         File.Move(tempPath, _configPath, overwrite: true);
     }
 
-    private static void NormalizeLoadedConfig(AppConfig config)
+    private static bool TryNormalizeLoadedConfig(AppConfig config)
     {
         if (Array.IndexOf(ValidGridLayouts, config.GridLayout) < 0)
         {
@@ -512,8 +515,17 @@ public sealed class CameraStore
         }
 
         config.Cameras ??= new List<CameraConfig>();
-        foreach (CameraConfig cam in config.Cameras)
+        var validCameras = new List<CameraConfig>(Math.Min(config.Cameras.Count, MaxSlots));
+        var usedSlots = new HashSet<int>();
+        var needsReassignment = new List<CameraConfig>();
+
+        foreach (CameraConfig? cam in config.Cameras)
         {
+            if (cam is null)
+            {
+                return false;
+            }
+
             if (string.IsNullOrWhiteSpace(cam.Id))
             {
                 cam.Id = Guid.NewGuid().ToString("N")[..12];
@@ -524,14 +536,48 @@ public sealed class CameraStore
                 cam.Port = 554;
             }
 
+            cam.Name ??= string.Empty;
             cam.Path ??= string.Empty;
             cam.Username ??= string.Empty;
             cam.EncryptedPassword ??= string.Empty;
             cam.Transport = string.Equals(cam.Transport, "udp", StringComparison.OrdinalIgnoreCase)
                 ? "udp"
                 : "tcp";
+
+            if (cam.Slot is >= 1 and <= MaxSlots && usedSlots.Add(cam.Slot))
+            {
+                validCameras.Add(cam);
+            }
+            else
+            {
+                needsReassignment.Add(cam);
+            }
         }
 
-        config.Cameras.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+        foreach (CameraConfig cam in needsReassignment)
+        {
+            int nextFreeSlot = 0;
+            for (int slot = 1; slot <= MaxSlots; slot++)
+            {
+                if (usedSlots.Add(slot))
+                {
+                    nextFreeSlot = slot;
+                    break;
+                }
+            }
+
+            if (nextFreeSlot == 0)
+            {
+                // Drop excess cameras beyond MaxSlots so slots stay unique within 1..16.
+                break;
+            }
+
+            cam.Slot = nextFreeSlot;
+            validCameras.Add(cam);
+        }
+
+        validCameras.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+        config.Cameras = validCameras;
+        return true;
     }
 }

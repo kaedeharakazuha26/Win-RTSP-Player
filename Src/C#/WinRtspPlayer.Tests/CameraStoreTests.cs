@@ -179,6 +179,70 @@ public class CameraStoreTests : IDisposable
     }
 
     [Fact]
+    public void LoadOrCreate_BacksUpCorruptConfig_WhenCamerasArrayContainsNullElement()
+    {
+        string configDir = Path.Combine(_tempDir, "config");
+        Directory.CreateDirectory(configDir);
+        string configPath = Path.Combine(configDir, "cameras.json");
+        File.WriteAllText(
+            configPath,
+            """
+            {
+              "GridLayout": 9,
+              "Cameras": [
+                { "Id": "cam1", "Slot": 1, "Name": "Valid", "Ip": "192.168.1.10" },
+                null
+              ]
+            }
+            """,
+            Encoding.UTF8);
+
+        var store = new CameraStore(_tempDir, new DpapiSecretProtector());
+        AppConfig config = store.LoadOrCreate();
+
+        Assert.NotNull(config);
+        Assert.Equal(4, config.GridLayout);
+        Assert.Empty(config.Cameras);
+
+        string[] backups = Directory.GetFiles(configDir, "cameras.json.corrupt.*");
+        Assert.Single(backups);
+        Assert.True(File.Exists(configPath));
+    }
+
+    [Fact]
+    public void LoadOrCreate_DeduplicatesAndNormalizesOutOfRangeSlotsUpToMaxSlots()
+    {
+        string configDir = Path.Combine(_tempDir, "config");
+        Directory.CreateDirectory(configDir);
+        string configPath = Path.Combine(configDir, "cameras.json");
+
+        var camerasJson = new StringBuilder();
+        camerasJson.Append("""{ "GridLayout": 4, "Cameras": [""");
+        camerasJson.Append("""{ "Id": "c1", "Slot": 2, "Name": "ValidSlot2", "Ip": "192.168.1.1" },""");
+        camerasJson.Append("""{ "Id": "c2", "Slot": 2, "Name": "DupSlot2", "Ip": "192.168.1.2" },""");
+        camerasJson.Append("""{ "Id": "c3", "Slot": 0, "Name": "ZeroSlot", "Ip": "192.168.1.3" },""");
+        camerasJson.Append("""{ "Id": "c4", "Slot": 99, "Name": "HighSlot", "Ip": "192.168.1.4" }""");
+        for (int i = 5; i <= 18; i++)
+        {
+            camerasJson.Append($$""",{ "Id": "c{{i}}", "Slot": {{i}}, "Name": "Cam{{i}}", "Ip": "192.168.1.{{i}}" }""");
+        }
+        camerasJson.Append("]}");
+
+        File.WriteAllText(configPath, camerasJson.ToString(), Encoding.UTF8);
+
+        var store = new CameraStore(_tempDir, new DpapiSecretProtector());
+        AppConfig config = store.LoadOrCreate();
+
+        Assert.Equal(CameraStore.MaxSlots, config.Cameras.Count);
+        Assert.Equal(CameraStore.MaxSlots, config.Cameras.Select(c => c.Slot).Distinct().Count());
+        Assert.All(config.Cameras, c => Assert.InRange(c.Slot, 1, CameraStore.MaxSlots));
+        Assert.Equal(2, Assert.Single(config.Cameras, c => c.Id == "c1").Slot);
+        Assert.Equal(1, Assert.Single(config.Cameras, c => c.Id == "c2").Slot);
+        Assert.Equal(3, Assert.Single(config.Cameras, c => c.Id == "c3").Slot);
+        Assert.Equal(4, Assert.Single(config.Cameras, c => c.Id == "c4").Slot);
+    }
+
+    [Fact]
     public void UpdateCamera_FiresCameraChangedAndUpdatesOnlySpecifiedFields()
     {
         var store = new CameraStore(_tempDir, new DpapiSecretProtector());

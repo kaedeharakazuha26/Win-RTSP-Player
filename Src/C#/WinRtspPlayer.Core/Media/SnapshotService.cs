@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using WinRtspPlayer.Core.Config;
 
@@ -34,6 +36,8 @@ public interface ISnapshotRunner
 /// </summary>
 public sealed class FfmpegSnapshotRunner : ISnapshotRunner
 {
+    internal const string StartFailureDataKey = "WinRtspPlayer.FfmpegStartFailure";
+
     private static readonly Regex RtspCredentialRegex = new(
         @"(?i)\brtsps?://(?:[^\s/@""'<>]+@)+",
         RegexOptions.Compiled);
@@ -93,17 +97,19 @@ public sealed class FfmpegSnapshotRunner : ISnapshotRunner
             startInfo.ArgumentList.Add(arg);
         }
 
+        ct.ThrowIfCancellationRequested();
+
         using var process = new Process { StartInfo = startInfo };
         try
         {
             if (!process.Start())
             {
-                throw new InvalidOperationException($"Failed to start ffmpeg '{resolvedFfmpegPath}'.");
+                throw CreateStartFailureException($"Failed to start ffmpeg '{resolvedFfmpegPath}'.");
             }
         }
-        catch (Exception ex) when (ex is not InvalidOperationException)
+        catch (Exception ex) when (ex is not InvalidOperationException and not OperationCanceledException)
         {
-            throw new InvalidOperationException(
+            throw CreateStartFailureException(
                 $"Failed to start ffmpeg '{resolvedFfmpegPath}': {SanitizeErrorText(ex.Message)}");
         }
 
@@ -125,6 +131,7 @@ public sealed class FfmpegSnapshotRunner : ISnapshotRunner
         {
             TryKillProcessTree(process);
             await DrainTasksQuietlyAsync(copyStdoutTask, readStderrTask, waitForExitTask).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
             throw;
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
@@ -174,18 +181,26 @@ public sealed class FfmpegSnapshotRunner : ISnapshotRunner
         });
     }
 
+    private static InvalidOperationException CreateStartFailureException(string message)
+    {
+        var ex = new InvalidOperationException(message);
+        ex.Data[StartFailureDataKey] = true;
+        return ex;
+    }
+
     private static string ResolveExecutablePath(string ffmpegPath)
     {
-        if (Path.IsPathRooted(ffmpegPath))
+        if (Path.IsPathFullyQualified(ffmpegPath))
         {
-            return ffmpegPath;
+            return ResolveWindowsExeIfPresent(ffmpegPath);
         }
 
         // Resolve relative subpaths against AppContext.BaseDirectory rather than Environment.CurrentDirectory,
         // while keeping bare command names (e.g. "ffmpeg") resolvable via PATH.
         if (ffmpegPath.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0)
         {
-            return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ffmpegPath));
+            string combined = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ffmpegPath));
+            return ResolveWindowsExeIfPresent(combined);
         }
 
         string localCandidate = Path.Combine(AppContext.BaseDirectory, ffmpegPath);
@@ -194,7 +209,29 @@ public sealed class FfmpegSnapshotRunner : ISnapshotRunner
             return localCandidate;
         }
 
+        if (OperatingSystem.IsWindows() && !Path.HasExtension(ffmpegPath))
+        {
+            string localExeCandidate = localCandidate + ".exe";
+            if (File.Exists(localExeCandidate))
+            {
+                return localExeCandidate;
+            }
+        }
+
         return ffmpegPath;
+    }
+
+    private static string ResolveWindowsExeIfPresent(string candidate)
+    {
+        if (OperatingSystem.IsWindows() &&
+            !Path.HasExtension(candidate) &&
+            !File.Exists(candidate) &&
+            File.Exists(candidate + ".exe"))
+        {
+            return candidate + ".exe";
+        }
+
+        return candidate;
     }
 
     private static void TryKillProcessTree(Process process)
@@ -264,7 +301,18 @@ public sealed class SnapshotService
         try
         {
             string ffmpegPath = _store.GetConfigSnapshot().FfmpegPath;
-            string rtspUrl = _store.BuildRtspUrl(camera);
+            string rtspUrl;
+            try
+            {
+                rtspUrl = _store.BuildRtspUrl(camera);
+            }
+            catch (Exception ex) when (ex is CryptographicException or FormatException)
+            {
+                throw new InvalidOperationException(
+                    $"Stored credentials for camera '{camera.Id}' could not be decrypted on this Windows account. Re-enter the camera password.",
+                    ex);
+            }
+
             bool usedFallback = false;
             byte[] bytes;
 
@@ -281,11 +329,17 @@ public sealed class SnapshotService
             {
                 throw;
             }
-            catch when (_playback is not null && _playback.IsPlaying(camera.Id))
+            catch (Exception ex) when (_playback is not null &&
+                                       _playback.IsPlaying(camera.Id) &&
+                                       !IsRunnerStartFailure(ex))
             {
-                await _playback.StopCameraAsync(camera.Id, ct).ConfigureAwait(false);
+                bool stopped = false;
                 try
                 {
+                    await _playback.StopCameraAsync(camera.Id, CancellationToken.None).ConfigureAwait(false);
+                    stopped = true;
+                    ct.ThrowIfCancellationRequested();
+
                     bytes = await _runner.CaptureJpegAsync(
                         ffmpegPath,
                         rtspUrl,
@@ -297,7 +351,10 @@ public sealed class SnapshotService
                 finally
                 {
                     // Always resume the user's live tile even if the retry failed or the caller canceled.
-                    await _playback.StartCameraAsync(camera.Id, CancellationToken.None).ConfigureAwait(false);
+                    if (stopped)
+                    {
+                        await _playback.StartCameraAsync(camera.Id, CancellationToken.None).ConfigureAwait(false);
+                    }
                 }
             }
 
@@ -306,7 +363,12 @@ public sealed class SnapshotService
                 throw new InvalidOperationException("Captured snapshot is not a valid JPEG image.");
             }
 
-            TryParseJpegDimensions(bytes, out int width, out int height);
+            if (!TryParseJpegDimensions(bytes, out int width, out int height))
+            {
+                width = 0;
+                height = 0;
+            }
+
             return new SnapshotResult(bytes, width, height, DateTimeOffset.UtcNow, usedFallback);
         }
         finally
@@ -381,9 +443,18 @@ public sealed class SnapshotService
                     return false;
                 }
 
-                height = (jpeg[pos + 3] << 8) | jpeg[pos + 4];
-                width = (jpeg[pos + 5] << 8) | jpeg[pos + 6];
-                return width > 0 && height > 0;
+                int parsedHeight = (jpeg[pos + 3] << 8) | jpeg[pos + 4];
+                int parsedWidth = (jpeg[pos + 5] << 8) | jpeg[pos + 6];
+                if (parsedWidth <= 0 || parsedHeight <= 0)
+                {
+                    width = 0;
+                    height = 0;
+                    return false;
+                }
+
+                width = parsedWidth;
+                height = parsedHeight;
+                return true;
             }
 
             pos += segmentLength;
@@ -391,4 +462,8 @@ public sealed class SnapshotService
 
         return false;
     }
+
+    private static bool IsRunnerStartFailure(Exception ex) =>
+        ex is FileNotFoundException or Win32Exception ||
+        ex.Data.Contains(FfmpegSnapshotRunner.StartFailureDataKey);
 }

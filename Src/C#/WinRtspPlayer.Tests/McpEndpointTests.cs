@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using WinRtspPlayer.Core.Auth;
 using WinRtspPlayer.Core.Config;
@@ -536,6 +537,200 @@ public sealed class McpEndpointTests : IDisposable
         Assert.False(host.IsRunning);
         Assert.Equal(0, host.BoundPort);
         Assert.False(string.IsNullOrWhiteSpace(host.LastError));
+    }
+
+    [Fact]
+    public async Task McpEndpoint_NonAsciiSessionIdHeader_SucceedsWithout500()
+    {
+        (CameraStore store, OAuthAuthStore authStore, SnapshotService snapshots, FakeLivePlaybackController playback) = CreateDependencies();
+        string token = IssueAccessToken(authStore);
+
+        // 1. TestServer: verify non-ASCII and space-containing MCP-Session-Id are never echoed back and initialize regenerates a safe ASCII ID (0x21..0x7E).
+        await using TestApp testHost = await StartTestHostAsync(store, snapshots, authStore, playback);
+        foreach (string badSessionId in new[] { "bad-session-\u00e9", "bad session id" })
+        {
+            using var initReq = new HttpRequestMessage(HttpMethod.Post, "/mcp");
+            initReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            initReq.Headers.TryAddWithoutValidation("MCP-Session-Id", badSessionId);
+            initReq.Content = new StringContent(
+                """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}""",
+                Encoding.UTF8,
+                "application/json");
+            HttpResponseMessage initRes = await testHost.Client.SendAsync(initReq);
+            Assert.Equal(HttpStatusCode.OK, initRes.StatusCode);
+            string returnedSessionHeader = Assert.Single(initRes.Headers.GetValues("MCP-Session-Id"));
+            Assert.False(string.IsNullOrWhiteSpace(returnedSessionHeader));
+            Assert.All(returnedSessionHeader, c => Assert.InRange(c, '\x21', '\x7E'));
+        }
+
+        // 2. Real Kestrel (with UTF-8 request header decoding simulating HTTP/2 proxy delivery):
+        // verify writing response headers never throws InvalidOperationException (HTTP 500).
+        int port = FindFreeLoopbackPort();
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.Listen(IPAddress.Loopback, port);
+            options.RequestHeaderEncodingSelector = static _ => Encoding.UTF8;
+        });
+        WebApplication kestrelApp = builder.Build();
+        OAuthEndpoints.MapOAuthEndpoints(kestrelApp, authStore, () => store.GetConfigSnapshot().McpPublicBaseUrl);
+        McpEndpoint.MapMcpEndpoints(kestrelApp, store, snapshots, authStore, playback);
+        await kestrelApp.StartAsync();
+        try
+        {
+            string initRaw = await SendRawHttpPostUtf8Async(
+                port,
+                token,
+                sessionId: "bad-session-\u00e9",
+                jsonBody: """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}""");
+
+            Assert.StartsWith("HTTP/1.1 200 OK", initRaw, StringComparison.Ordinal);
+            string? kestrelSession = ExtractHeaderLineValue(initRaw, "MCP-Session-Id");
+            Assert.False(string.IsNullOrWhiteSpace(kestrelSession));
+            Assert.All(kestrelSession!, c => Assert.InRange(c, '\x21', '\x7E'));
+
+            string pingRaw = await SendRawHttpPostUtf8Async(
+                port,
+                token,
+                sessionId: "bad-session-\u00e9",
+                jsonBody: """{"jsonrpc":"2.0","id":2,"method":"ping"}""");
+
+            Assert.StartsWith("HTTP/1.1 200 OK", pingRaw, StringComparison.Ordinal);
+            Assert.Null(ExtractHeaderLineValue(pingRaw, "MCP-Session-Id"));
+        }
+        finally
+        {
+            await kestrelApp.StopAsync();
+            await kestrelApp.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task McpEndpoint_UpdateCamera_RejectsContradictoryPasswordAndClearPassword()
+    {
+        (CameraStore store, OAuthAuthStore authStore, SnapshotService snapshots, _) = CreateDependencies();
+        const string originalSecret = "OriginalSecret!123";
+        const string contradictorySecret = "ContradictorySecret!999";
+        CameraConfig cam = store.AddCamera(new CameraAddRequest(
+            Name: "Lobby",
+            Ip: "192.168.1.33",
+            Username: "admin",
+            Password: originalSecret));
+
+        string token = IssueAccessToken(authStore);
+        await using TestApp host = await StartTestHostAsync(store, snapshots, authStore, playback: null);
+
+        HttpResponseMessage res = await CallToolAsync(host.Client, token, "update_camera", new
+        {
+            camera = cam.Id,
+            password = contradictorySecret,
+            clear_password = true
+        });
+        string raw = await res.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(contradictorySecret, raw, StringComparison.Ordinal);
+        Assert.True(JsonNode.Parse(raw)!["result"]!["isError"]?.GetValue<bool>());
+        Assert.Equal(originalSecret, store.GetPlaintextPassword(store.FindCamera(cam.Id)!));
+    }
+
+    [Fact]
+    public async Task McpServerHost_InvalidPortWhileRunningAndConcurrentDispose_DoNotClobberOrThrowSemaphoreDisposed()
+    {
+        (CameraStore store, OAuthAuthStore authStore, SnapshotService snapshots, FakeLivePlaybackController playback) = CreateDependencies();
+        int port = FindFreeLoopbackPort();
+
+        var host = new McpServerHost(store, snapshots, authStore, playback);
+        await host.StartAsync(port);
+        Assert.True(host.IsRunning);
+        Assert.Null(host.LastError);
+
+        // Invalid-port calls while running must not clobber LastError or stop the running server.
+        await Assert.ThrowsAnyAsync<ArgumentOutOfRangeException>(() => host.StartAsync(0));
+        await Assert.ThrowsAnyAsync<ArgumentOutOfRangeException>(() => host.RestartAsync(70000));
+        Assert.True(host.IsRunning);
+        Assert.Equal(port, host.BoundPort);
+        Assert.Null(host.LastError);
+
+        using (var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") })
+        {
+            HttpResponseMessage res = await http.GetAsync("/.well-known/oauth-protected-resource");
+            Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        }
+
+        // Concurrent DisposeAsync / StopAsync must never throw ObjectDisposedException.
+        await Task.WhenAll(
+            host.DisposeAsync().AsTask(),
+            host.DisposeAsync().AsTask(),
+            host.StopAsync(),
+            host.StopAsync());
+
+        // StartAsync / RestartAsync on disposed host must throw ObjectDisposedException for McpServerHost (not SemaphoreSlim).
+        ObjectDisposedException startEx = await Assert.ThrowsAsync<ObjectDisposedException>(() => host.StartAsync(port));
+        Assert.Contains(nameof(McpServerHost), startEx.ObjectName, StringComparison.Ordinal);
+
+        // Concurrent StartAsync vs DisposeAsync on a fresh host must not leak SemaphoreSlim ObjectDisposedException.
+        for (int i = 0; i < 5; i++)
+        {
+            int nextPort = FindFreeLoopbackPort();
+            var raceHost = new McpServerHost(store, snapshots, authStore, playback);
+            Task startTask = Task.Run(async () =>
+            {
+                try
+                {
+                    await raceHost.StartAsync(nextPort);
+                }
+                catch (ObjectDisposedException ex) when (ex.ObjectName?.Contains(nameof(McpServerHost), StringComparison.Ordinal) == true)
+                {
+                    // Expected if DisposeAsync won the lifecycle lock first.
+                }
+            });
+            Task disposeTask = raceHost.DisposeAsync().AsTask();
+            Task stopTask = raceHost.StopAsync();
+            await Task.WhenAll(startTask, disposeTask, stopTask);
+        }
+    }
+
+    private static async Task<string> SendRawHttpPostUtf8Async(int port, string bearerToken, string sessionId, string jsonBody)
+    {
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        await using NetworkStream stream = client.GetStream();
+
+        byte[] bodyBytes = Encoding.UTF8.GetBytes(jsonBody);
+        string headers =
+            $"POST /mcp HTTP/1.1\r\n" +
+            $"Host: 127.0.0.1:{port}\r\n" +
+            $"Authorization: Bearer {bearerToken}\r\n" +
+            $"MCP-Session-Id: {sessionId}\r\n" +
+            $"Content-Type: application/json\r\n" +
+            $"Content-Length: {bodyBytes.Length}\r\n" +
+            $"Connection: close\r\n\r\n";
+
+        byte[] headerBytes = Encoding.UTF8.GetBytes(headers);
+        await stream.WriteAsync(headerBytes);
+        await stream.WriteAsync(bodyBytes);
+        await stream.FlushAsync();
+
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return await reader.ReadToEndAsync();
+    }
+
+    private static string? ExtractHeaderLineValue(string rawHttpResponse, string headerName)
+    {
+        string prefix = headerName + ":";
+        foreach (string line in rawHttpResponse.Split("\r\n", StringSplitOptions.None))
+        {
+            if (line.Length == 0)
+            {
+                break;
+            }
+
+            if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return line[prefix.Length..].Trim();
+            }
+        }
+
+        return null;
     }
 
     private (CameraStore Store, OAuthAuthStore AuthStore, SnapshotService Snapshots, FakeLivePlaybackController Playback)

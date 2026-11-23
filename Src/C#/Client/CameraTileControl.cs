@@ -158,6 +158,8 @@ public sealed class CameraTileControl : UserControl
 
     public string? CameraId => _camera?.Id;
 
+    public TilePlaybackState PlaybackState => _playbackState;
+
     public IntPtr VideoHandle => _videoPanel.Handle;
 
     public event EventHandler? PlayStopClicked;
@@ -174,8 +176,12 @@ public sealed class CameraTileControl : UserControl
 
     public void SetCamera(CameraConfig? camera)
     {
+        bool sameCamera = camera is not null &&
+            _camera is not null &&
+            string.Equals(_camera.Id, camera.Id, StringComparison.Ordinal);
+
         _camera = camera?.Clone();
-        if (_camera is null)
+        if (!sameCamera)
         {
             _playbackState = TilePlaybackState.Stopped;
             _toolTip.SetToolTip(_statusLabel, null);

@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Sockets;
+
 namespace WinRtspPlayer.Core.Config;
 
 /// <summary>
@@ -14,12 +17,34 @@ public static class RtspUrlCodec
             return "Camera host/IP must not be empty.";
         }
 
+        int colonCount = 0;
         foreach (char c in ip)
         {
             if (char.IsWhiteSpace(c) || char.IsControl(c) || Array.IndexOf(ForbiddenHostChars, c) >= 0)
             {
                 return "Camera host/IP contains invalid characters.";
             }
+
+            if (c == ':')
+            {
+                colonCount++;
+            }
+        }
+
+        if (colonCount == 1)
+        {
+            return "Camera host/IP must not include a port (use the Port field instead).";
+        }
+
+        if (colonCount >= 2 &&
+            (!IPAddress.TryParse(ip, out IPAddress? parsedIp) || parsedIp.AddressFamily != AddressFamily.InterNetworkV6))
+        {
+            return "Camera IPv6 address is invalid.";
+        }
+
+        if (Uri.CheckHostName(ip) == UriHostNameType.Unknown)
+        {
+            return "Camera host/IP is not a valid hostname or IP address.";
         }
 
         if (port is < 1 or > 65535)

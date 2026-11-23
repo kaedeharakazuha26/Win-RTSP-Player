@@ -221,6 +221,133 @@ public class SnapshotServiceTests : IDisposable
         Assert.False(SnapshotService.TryParseJpegDimensions(truncatedSof, out int wTrunc, out int hTrunc));
         Assert.Equal(0, wTrunc);
         Assert.Equal(0, hTrunc);
+
+        byte[] zeroHeightSof = CreateMinimalJpeg(width: 640, height: 0, sofMarker: 0xC0);
+        Assert.False(SnapshotService.TryParseJpegDimensions(zeroHeightSof, out int wZeroH, out int hZeroH));
+        Assert.Equal(0, wZeroH);
+        Assert.Equal(0, hZeroH);
+
+        byte[] zeroWidthSof = CreateMinimalJpeg(width: 0, height: 480, sofMarker: 0xC0);
+        Assert.False(SnapshotService.TryParseJpegDimensions(zeroWidthSof, out int wZeroW, out int hZeroW));
+        Assert.Equal(0, wZeroW);
+        Assert.Equal(0, hZeroW);
+    }
+
+    [Fact]
+    public async Task CaptureAsync_WhenFfmpegFailsToStart_DoesNotPauseOrResumePlayingCamera()
+    {
+        (CameraStore store, CameraConfig cam) = CreateStoreWithCamera();
+        var playback = new FakeLivePlaybackController(isPlaying: true);
+
+        // 1. Direct FileNotFoundException / Win32Exception from ISnapshotRunner
+        var fnfRunner = new FakeSnapshotRunner((_, _, _, _, _) =>
+            throw new FileNotFoundException("ffmpeg.exe not found"));
+        var fnfService = new SnapshotService(store, fnfRunner, playback);
+        await Assert.ThrowsAsync<FileNotFoundException>(() => fnfService.CaptureAsync(cam));
+        Assert.Equal(1, fnfRunner.CallCount);
+        Assert.Empty(playback.Events);
+
+        var win32Runner = new FakeSnapshotRunner((_, _, _, _, _) =>
+            throw new System.ComponentModel.Win32Exception(2, "The system cannot find the file specified."));
+        var win32Service = new SnapshotService(store, win32Runner, playback);
+        await Assert.ThrowsAsync<System.ComponentModel.Win32Exception>(() => win32Service.CaptureAsync(cam));
+        Assert.Equal(1, win32Runner.CallCount);
+        Assert.Empty(playback.Events);
+
+        // 2. Real FfmpegSnapshotRunner with missing executable path
+        store.UpdateSettings(cfg => cfg.FfmpegPath = Path.Combine(_tempDir, "missing-ffmpeg.exe"));
+        var realService = new SnapshotService(store, new FfmpegSnapshotRunner(), playback);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => realService.CaptureAsync(cam));
+        Assert.Empty(playback.Events);
+    }
+
+    [Fact]
+    public async Task CaptureAsync_WhenStoredPasswordCannotDecrypt_ThrowsCleanInvalidOperationWithoutLeakingSecret()
+    {
+        var store = new CameraStore(_tempDir, new DpapiSecretProtector());
+        store.LoadOrCreate();
+        CameraConfig cam = store.AddCamera(new CameraAddRequest(
+            Name: "Broken Secret Cam",
+            Ip: "192.168.1.77",
+            Username: "admin",
+            Password: "ValidPassword123"));
+
+        // Corrupt the stored ciphertext so Unprotect throws FormatException / CryptographicException.
+        cam.EncryptedPassword = "not-valid-base64-or-dpapi!!!";
+
+        var runner = new FakeSnapshotRunner((_, _, _, _, _) => Task.FromResult(CreateMinimalJpeg(640, 480)));
+        var playback = new FakeLivePlaybackController(isPlaying: true);
+        var service = new SnapshotService(store, runner, playback);
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.CaptureAsync(cam));
+        Assert.Contains(cam.Id, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("could not be decrypted", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ValidPassword123", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("not-valid-base64", ex.Message, StringComparison.Ordinal);
+
+        // Also verify CryptographicException from valid Base64 with invalid DPAPI payload
+        cam.EncryptedPassword = Convert.ToBase64String([1, 2, 3, 4, 5, 6, 7, 8]);
+        InvalidOperationException cryptoEx = await Assert.ThrowsAsync<InvalidOperationException>(() => service.CaptureAsync(cam));
+        Assert.Contains(cam.Id, cryptoEx.Message, StringComparison.Ordinal);
+        Assert.Contains("could not be decrypted", cryptoEx.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, runner.CallCount);
+        Assert.Empty(playback.Events);
+    }
+
+    [Fact]
+    public async Task CaptureAsync_WhenCanceledRightAsFallbackStopsCamera_StillResumesLiveCamera()
+    {
+        (CameraStore store, CameraConfig cam) = CreateStoreWithCamera();
+        using var cts = new CancellationTokenSource();
+
+        var runner = new FakeSnapshotRunner((_, _, _, _, _) =>
+            throw new InvalidOperationException("453 Not Enough Bandwidth"));
+
+        var playback = new FakeLivePlaybackController(isPlaying: true, onEvent: ev =>
+        {
+            if (ev.StartsWith("stop:", StringComparison.Ordinal))
+            {
+                // Cancel caller token right when StopCameraAsync completes.
+                cts.Cancel();
+            }
+        });
+
+        var service = new SnapshotService(store, runner, playback);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.CaptureAsync(cam, cts.Token));
+        Assert.Equal(1, runner.CallCount);
+        Assert.Equal([$"stop:{cam.Id}", $"start:{cam.Id}"], playback.Events);
+        Assert.Equal(CancellationToken.None, playback.LastStartCancellationToken);
+    }
+
+    [Fact]
+    public async Task FfmpegSnapshotRunner_PreCanceledTokenAndWindowsExeResolution()
+    {
+        var runner = new FfmpegSnapshotRunner();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        OperationCanceledException canceledEx = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            runner.CaptureJpegAsync(
+                Path.Combine(_tempDir, "nonexistent-ffmpeg.exe"),
+                "rtsp://127.0.0.1:554/stream1",
+                "tcp",
+                TimeSpan.FromSeconds(2),
+                cts.Token));
+        Assert.Equal(cts.Token, canceledEx.CancellationToken);
+
+        string dummyNoExt = Path.Combine(_tempDir, "custom-ffmpeg");
+        string dummyExe = dummyNoExt + ".exe";
+        await File.WriteAllBytesAsync(dummyExe, [0x00]);
+
+        InvalidOperationException startEx = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            runner.CaptureJpegAsync(
+                dummyNoExt,
+                "rtsp://127.0.0.1:554/stream1",
+                "tcp",
+                TimeSpan.FromSeconds(2),
+                CancellationToken.None));
+        Assert.Contains(dummyExe, startEx.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     private (CameraStore Store, CameraConfig Camera) CreateStoreWithCamera()

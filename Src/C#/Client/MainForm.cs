@@ -403,7 +403,8 @@ public sealed class MainForm : Form, ILivePlaybackController
         }
 
         AppConfig config = _store.GetConfigSnapshot();
-        if (evt.Kind == CameraChangeKind.Added && evt.Camera.Slot > config.GridLayout)
+        if (evt.Kind is CameraChangeKind.Added or CameraChangeKind.Updated &&
+            evt.Camera.Slot > config.GridLayout)
         {
             int expandedGrid = ValidGridLayouts.FirstOrDefault(g => g >= evt.Camera.Slot, 16);
             _store.UpdateSettings(s => s.GridLayout = expandedGrid);
@@ -426,7 +427,7 @@ public sealed class MainForm : Form, ILivePlaybackController
         {
             StartCameraCore(evt.Camera.Id);
         }
-        else if (evt.Kind == CameraChangeKind.Updated && wasPlaying)
+        else if (evt.Kind == CameraChangeKind.Updated && (wasPlaying || evt.Camera.AutoPlay))
         {
             StartCameraCore(evt.Camera.Id);
         }
@@ -439,15 +440,20 @@ public sealed class MainForm : Form, ILivePlaybackController
         {
             int slot = i + 1;
             CameraTileControl tile = _tiles[i];
+            string? previousCameraId = tile.CameraId;
             bySlot.TryGetValue(slot, out CameraConfig? cam);
             tile.SetCamera(cam);
-            if (cam is not null && _activeChannels.ContainsKey(cam.Id))
+            if (cam is not null)
             {
-                tile.SetStatus(TilePlaybackState.Playing);
-            }
-            else if (cam is not null)
-            {
-                tile.SetStatus(TilePlaybackState.Stopped);
+                if (_activeChannels.ContainsKey(cam.Id))
+                {
+                    tile.SetStatus(TilePlaybackState.Playing);
+                }
+                else if (!(string.Equals(previousCameraId, cam.Id, StringComparison.Ordinal) &&
+                           tile.PlaybackState == TilePlaybackState.Error))
+                {
+                    tile.SetStatus(TilePlaybackState.Stopped);
+                }
             }
         }
     }
@@ -556,7 +562,17 @@ public sealed class MainForm : Form, ILivePlaybackController
         tile.SetStatus(TilePlaybackState.Connecting);
 
         AppConfig config = _store.GetConfigSnapshot();
-        string rtspUrl = _store.BuildRtspUrl(cam);
+        string rtspUrl;
+        try
+        {
+            rtspUrl = _store.BuildRtspUrl(cam);
+        }
+        catch (Exception)
+        {
+            tile.SetStatus(TilePlaybackState.Error, "Failed to decrypt saved password.");
+            return false;
+        }
+
         int rtpOverTcp = string.Equals(cam.Transport, "udp", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
 
         int channelId = PlayerSdk.EasyPlayer_OpenStream(
@@ -628,7 +644,9 @@ public sealed class MainForm : Form, ILivePlaybackController
 
         if (!InvokeRequired)
         {
-            return action();
+            return (_isClosing || IsDisposed || Disposing || !IsHandleCreated)
+                ? defaultValue
+                : action();
         }
 
         CancellationToken shutdownToken;
@@ -756,8 +774,34 @@ public sealed class MainForm : Form, ILivePlaybackController
 
     private void OpenCameraDialog(CameraConfig? existing, int defaultSlot)
     {
-        string existingPassword = existing is null ? string.Empty : _store.GetPlaintextPassword(existing);
-        using var dialog = new EditCameraDialog(existing, existingPassword, defaultSlot);
+        string existingPassword = string.Empty;
+        if (existing is not null)
+        {
+            try
+            {
+                existingPassword = _store.GetPlaintextPassword(existing);
+            }
+            catch (Exception)
+            {
+                MessageBox.Show(
+                    this,
+                    "The saved password for this camera could not be decrypted. Enter a new password and save to replace it, or leave it blank to clear.",
+                    "Password Decryption Warning",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+
+        string? ValidateSlot(int slot)
+        {
+            CameraConfig? occupant = _store.GetConfigSnapshot().Cameras
+                .FirstOrDefault(c => c.Slot == slot && !string.Equals(c.Id, existing?.Id, StringComparison.Ordinal));
+            return occupant is null
+                ? null
+                : $"Slot {slot} is already occupied by '{occupant.Name}'. Choose a free slot.";
+        }
+
+        using var dialog = new EditCameraDialog(existing, existingPassword, defaultSlot, ValidateSlot);
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;

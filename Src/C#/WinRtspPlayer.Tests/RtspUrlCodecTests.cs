@@ -63,6 +63,10 @@ public class RtspUrlCodecTests
     [InlineData("192.168.1.10?a=1", 554, "/stream1", "tcp")]
     [InlineData("192.168.1.10#frag", 554, "/stream1", "tcp")]
     [InlineData("192.168.1.10\n", 554, "/stream1", "tcp")]
+    [InlineData("192.168.1.10:8554", 554, "/stream1", "tcp")]
+    [InlineData("cam.local:554", 554, "/stream1", "tcp")]
+    [InlineData("[::1]:8554", 554, "/stream1", "tcp")]
+    [InlineData(":::", 554, "/stream1", "tcp")]
     [InlineData("192.168.1.10", 0, "/stream1", "tcp")]
     [InlineData("192.168.1.10", 70000, "/stream1", "tcp")]
     [InlineData("192.168.1.10", 554, "stream1", "tcp")]
@@ -78,6 +82,8 @@ public class RtspUrlCodecTests
     [InlineData("192.168.1.10", 554, "", "tcp")]
     [InlineData("cam.local", 8554, "/live/ch0?sub=1", "UDP")]
     [InlineData("[::1]", 554, "/stream1", "Tcp")]
+    [InlineData("::1", 554, "/stream1", "tcp")]
+    [InlineData("fe80::1", 554, "/stream1", "tcp")]
     public void ValidateCameraInput_AcceptsValidInputs(
         string ip, int port, string path, string transport)
     {

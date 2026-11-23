@@ -23,7 +23,7 @@ public sealed class McpServerHost : IAsyncDisposable
     private volatile bool _isRunning;
     private volatile int _boundPort;
     private volatile string? _lastError;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public McpServerHost(
         CameraStore store,
@@ -44,12 +44,12 @@ public sealed class McpServerHost : IAsyncDisposable
     public async Task StartAsync(int port, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ValidatePort(port);
 
         await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            ValidatePort(port);
             if (_app is not null)
             {
                 throw new InvalidOperationException("MCP server is already running.");
@@ -66,12 +66,12 @@ public sealed class McpServerHost : IAsyncDisposable
     public async Task RestartAsync(int newPort, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ValidatePort(newPort);
 
         await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            ValidatePort(newPort);
             await StopCoreAsync(ct).ConfigureAwait(false);
             await StartCoreAsync(newPort, ct).ConfigureAwait(false);
         }
@@ -91,6 +91,11 @@ public sealed class McpServerHost : IAsyncDisposable
         await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             await StopCoreAsync(ct).ConfigureAwait(false);
         }
         finally
@@ -119,8 +124,9 @@ public sealed class McpServerHost : IAsyncDisposable
         }
         finally
         {
+            // Keep _lifecycleLock undisposed (no kernel handle is allocated without AvailableWaitHandle)
+            // so concurrent waiters and finally blocks never throw ObjectDisposedException.
             _lifecycleLock.Release();
-            _lifecycleLock.Dispose();
         }
     }
 
@@ -129,7 +135,11 @@ public sealed class McpServerHost : IAsyncDisposable
         if (port is < 1 or > 65535)
         {
             string message = $"MCP port must be between 1 and 65535 (got {port}).";
-            _lastError = message;
+            if (!_isRunning)
+            {
+                _lastError = message;
+            }
+
             throw new ArgumentOutOfRangeException(nameof(port), port, message);
         }
     }
