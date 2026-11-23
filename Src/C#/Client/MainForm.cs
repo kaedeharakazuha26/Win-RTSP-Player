@@ -37,7 +37,7 @@ public sealed class MainForm : Form, ILivePlaybackController
     private bool _sdkInitialized;
     private string? _sdkError;
     private bool _suppressToolbarEvents;
-    private bool _isClosing;
+    private volatile bool _isClosing;
     private int? _maximizedSlot;
     private Icon? _appIcon;
     private PlayerSdk.RENDER_FORMAT _renderFormat = PlayerSdk.RENDER_FORMAT.DISPLAY_FORMAT_RGB24_GDI;
@@ -274,6 +274,7 @@ public sealed class MainForm : Form, ILivePlaybackController
 
             _appIcon?.Dispose();
             _appIcon = null;
+            _shutdownCts.Dispose();
         }
 
         base.Dispose(disposing);
@@ -317,7 +318,6 @@ public sealed class MainForm : Form, ILivePlaybackController
             // Do not hang application exit if Kestrel shutdown exceeds timeout.
         }
 
-        _shutdownCts.Dispose();
         base.OnFormClosing(e);
     }
 
@@ -619,53 +619,92 @@ public sealed class MainForm : Form, ILivePlaybackController
         }
     }
 
-    private Task<T> RunOnUiAsync<T>(Func<T> action, T defaultValue, CancellationToken ct)
+    private async Task<T> RunOnUiAsync<T>(Func<T> action, T defaultValue, CancellationToken ct)
     {
         if (_isClosing || IsDisposed || Disposing || !IsHandleCreated)
         {
-            return Task.FromResult(defaultValue);
+            return defaultValue;
         }
 
         if (!InvokeRequired)
         {
-            return Task.FromResult(action());
+            return action();
         }
 
+        CancellationToken shutdownToken;
+        CancellationTokenRegistration ctReg = default;
+        CancellationTokenRegistration shutdownReg = default;
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdownCts.Token);
-        CancellationTokenRegistration registration = linkedCts.Token.Register(() => tcs.TrySetResult(defaultValue));
 
         try
         {
-            BeginInvoke(() =>
+            shutdownToken = _shutdownCts.Token;
+            ctReg = ct.Register(static state =>
             {
-                try
-                {
-                    if (_isClosing || IsDisposed || Disposing || linkedCts.IsCancellationRequested)
-                    {
-                        tcs.TrySetResult(defaultValue);
-                        return;
-                    }
-
-                    tcs.TrySetResult(action());
-                }
-                catch (Exception ex)
-                {
-                    tcs.TrySetException(ex);
-                }
-                finally
-                {
-                    registration.Dispose();
-                }
-            });
+                var (source, token) = ((TaskCompletionSource<T>, CancellationToken))state!;
+                source.TrySetCanceled(token);
+            }, (tcs, ct));
+            shutdownReg = shutdownToken.Register(static state =>
+            {
+                var (source, fallback) = ((TaskCompletionSource<T>, T))state!;
+                source.TrySetResult(fallback);
+            }, (tcs, defaultValue));
         }
-        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+        catch (ObjectDisposedException)
         {
-            registration.Dispose();
-            tcs.TrySetResult(defaultValue);
+            ctReg.Dispose();
+            shutdownReg.Dispose();
+            return defaultValue;
         }
 
-        return tcs.Task;
+        using (ctReg)
+        using (shutdownReg)
+        {
+            if (_isClosing || shutdownToken.IsCancellationRequested)
+            {
+                tcs.TrySetResult(defaultValue);
+                return await tcs.Task.ConfigureAwait(false);
+            }
+
+            if (ct.IsCancellationRequested)
+            {
+                tcs.TrySetCanceled(ct);
+                return await tcs.Task.ConfigureAwait(false);
+            }
+
+            try
+            {
+                BeginInvoke(() =>
+                {
+                    try
+                    {
+                        if (_isClosing || IsDisposed || Disposing || shutdownToken.IsCancellationRequested)
+                        {
+                            tcs.TrySetResult(defaultValue);
+                            return;
+                        }
+
+                        if (ct.IsCancellationRequested)
+                        {
+                            tcs.TrySetCanceled(ct);
+                            return;
+                        }
+
+                        tcs.TrySetResult(action());
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.TrySetException(ex);
+                    }
+                });
+            }
+            catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+            {
+                tcs.TrySetResult(defaultValue);
+            }
+
+            return await tcs.Task.ConfigureAwait(false);
+        }
     }
 
     private void OnTilePlayStopClicked(CameraTileControl tile)
