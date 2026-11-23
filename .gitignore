@@ -9,3 +9,8 @@
 /Bin/C++/rtsp.txt
 release
 releases
+.superpowers/
+Bin/WinRtspPlayer/
+**/bin/
+**/obj/
+**/config/
