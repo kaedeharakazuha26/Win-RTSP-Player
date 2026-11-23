@@ -328,8 +328,11 @@ public sealed class OAuthAuthStore
             }
 
             DateTimeOffset now = _utcNow();
-            List<TokenRecord> accessTokens = UnprotectTokenList(loaded.AccessTokens, now);
-            List<TokenRecord> refreshTokens = UnprotectTokenList(loaded.RefreshTokens, now);
+            if (!TryUnprotectTokenList(loaded.AccessTokens, now, out List<TokenRecord> accessTokens) ||
+                !TryUnprotectTokenList(loaded.RefreshTokens, now, out List<TokenRecord> refreshTokens))
+            {
+                return false;
+            }
 
             _clientId = clientId;
             _clientSecret = clientSecret;
@@ -346,16 +349,21 @@ public sealed class OAuthAuthStore
         }
     }
 
-    private List<TokenRecord> UnprotectTokenList(List<PersistedTokenRecord>? records, DateTimeOffset now)
+    private bool TryUnprotectTokenList(List<PersistedTokenRecord>? records, DateTimeOffset now, out List<TokenRecord> result)
     {
-        var result = new List<TokenRecord>();
+        result = new List<TokenRecord>();
         if (records is null)
         {
-            return result;
+            return true;
         }
 
-        foreach (PersistedTokenRecord record in records)
+        foreach (PersistedTokenRecord? record in records)
         {
+            if (record is null)
+            {
+                return false;
+            }
+
             if (record.ExpiresAtUtc <= now ||
                 string.IsNullOrWhiteSpace(record.EncryptedTokenHash) ||
                 string.IsNullOrWhiteSpace(record.EncryptedClientId))
@@ -369,7 +377,7 @@ public sealed class OAuthAuthStore
             result.Add(new TokenRecord(hashBytes, clientId, record.ExpiresAtUtc));
         }
 
-        return result;
+        return true;
     }
 
     private TokenPair IssueAndPersistTokenPairLocked(string clientId, DateTimeOffset now)

@@ -325,6 +325,9 @@ public sealed class OAuthEndpointsTests : IDisposable
         Assert.False(OAuthEndpoints.IsAllowedRedirectUri("https://evil.example.com/cb"));
         Assert.False(OAuthEndpoints.IsAllowedRedirectUri("https://notgoogle.com/cb"));
         Assert.False(OAuthEndpoints.IsAllowedRedirectUri("https://user:pass@gemini.google.com/cb"));
+        Assert.False(OAuthEndpoints.IsAllowedRedirectUri("https://@gemini.google.com/cb"));
+        Assert.False(OAuthEndpoints.IsAllowedRedirectUri("https://gemini.google.com/cb\n"));
+        Assert.False(OAuthEndpoints.IsAllowedRedirectUri("https://gemini.google.com/cb test"));
         Assert.False(OAuthEndpoints.IsAllowedRedirectUri("http://gemini.google.com/cb"));
     }
 
@@ -350,6 +353,7 @@ public sealed class OAuthEndpointsTests : IDisposable
                 ["passcode"] = "wrong-passcode"
             }));
             Assert.Equal(HttpStatusCode.Unauthorized, failRes.StatusCode);
+            AssertFrameAncestorsDenied(failRes);
         }
 
         // 6th attempt within 60s window must return 429 even with valid passcode
@@ -363,6 +367,7 @@ public sealed class OAuthEndpointsTests : IDisposable
             ["passcode"] = creds.ConsentPasscode
         }));
         Assert.Equal(HttpStatusCode.TooManyRequests, rateLimitedRes.StatusCode);
+        AssertFrameAncestorsDenied(rateLimitedRes);
 
         // After 61 seconds, window expires and valid passcode succeeds
         _now = _now.AddSeconds(61);
@@ -550,6 +555,36 @@ public sealed class OAuthEndpointsTests : IDisposable
     }
 
     [Fact]
+    public void CorruptMcpAuthJson_WithNullTokenElement_IsBackedUpAndRegeneratedCleanly()
+    {
+        var protector = new DpapiSecretProtector();
+        string configDir = Path.Combine(_tempDir, "config");
+        Directory.CreateDirectory(configDir);
+        string authPath = Path.Combine(configDir, "mcp-auth.json");
+
+        string jsonWithNullElement = JsonSerializer.Serialize(new
+        {
+            EncryptedClientId = protector.Protect("stale-client"),
+            EncryptedClientSecret = protector.Protect("stale-secret"),
+            EncryptedConsentPasscode = protector.Protect("stale-passcode"),
+            AccessTokens = new object?[] { null },
+            RefreshTokens = Array.Empty<object>()
+        });
+        File.WriteAllText(authPath, jsonWithNullElement, Encoding.UTF8);
+
+        var store = new OAuthAuthStore(_tempDir, protector, () => _now);
+        OAuthCredentialsView creds = store.GetCredentials();
+
+        Assert.NotEqual("stale-client", creds.ClientId);
+        Assert.False(string.IsNullOrWhiteSpace(creds.ClientSecret));
+        Assert.False(string.IsNullOrWhiteSpace(creds.ConsentPasscode));
+
+        string[] backups = Directory.GetFiles(configDir, "mcp-auth.json.corrupt.*");
+        Assert.Single(backups);
+        Assert.True(File.Exists(authPath));
+    }
+
+    [Fact]
     public async Task AuthorizeGet_HtmlEncodesUntrustedInputs()
     {
         var store = new OAuthAuthStore(_tempDir, new DpapiSecretProtector(), () => _now);
@@ -569,9 +604,18 @@ public sealed class OAuthEndpointsTests : IDisposable
 
         HttpResponseMessage res = await host.Client.GetAsync(url);
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        AssertFrameAncestorsDenied(res);
         string html = await res.Content.ReadAsStringAsync();
         Assert.DoesNotContain("<script>", html, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("&lt;script&gt;alert(1)&lt;/script&gt;", html, StringComparison.Ordinal);
+    }
+
+    private static void AssertFrameAncestorsDenied(HttpResponseMessage response)
+    {
+        Assert.True(response.Headers.TryGetValues("X-Frame-Options", out IEnumerable<string>? xfo));
+        Assert.Equal("DENY", Assert.Single(xfo));
+        Assert.True(response.Headers.TryGetValues("Content-Security-Policy", out IEnumerable<string>? csp));
+        Assert.Contains("frame-ancestors 'none'", Assert.Single(csp), StringComparison.Ordinal);
     }
 
     private static async Task<HttpResponseMessage> PostTokenWithBasicAsync(

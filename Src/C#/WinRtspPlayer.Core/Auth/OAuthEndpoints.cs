@@ -43,9 +43,25 @@ public static class OAuthEndpoints
     public static bool IsAllowedRedirectUri(string redirectUri)
     {
         if (string.IsNullOrWhiteSpace(redirectUri) ||
+            redirectUri.Any(c => char.IsControl(c) || char.IsWhiteSpace(c)) ||
             !Uri.TryCreate(redirectUri, UriKind.Absolute, out Uri? uri) ||
             !string.IsNullOrEmpty(uri.UserInfo) ||
+            uri.Authority.Contains('@', StringComparison.Ordinal) ||
             !string.IsNullOrEmpty(uri.Fragment))
+        {
+            return false;
+        }
+
+        int schemeSep = redirectUri.IndexOf("://", StringComparison.Ordinal);
+        if (schemeSep < 0)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<char> afterScheme = redirectUri.AsSpan(schemeSep + 3);
+        int authorityEnd = afterScheme.IndexOfAny(['/', '?', '#']);
+        ReadOnlySpan<char> rawAuthority = authorityEnd >= 0 ? afterScheme[..authorityEnd] : afterScheme;
+        if (rawAuthority.Contains('@'))
         {
             return false;
         }
@@ -114,7 +130,7 @@ public static class OAuthEndpoints
                 return Results.BadRequest(new OAuthErrorResponse("invalid_request", validationError));
             }
 
-            return Results.Content(RenderConsentHtml(requestParams, errorBanner: null), "text/html; charset=utf-8", Encoding.UTF8);
+            return ConsentHtmlResult(ctx, StatusCodes.Status200OK, RenderConsentHtml(requestParams, errorBanner: null));
         });
 
         app.MapPost("/oauth/authorize", async (HttpContext ctx) =>
@@ -137,18 +153,16 @@ public static class OAuthEndpoints
             {
                 if (isRateLimited)
                 {
-                    ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                    return Results.Content(
-                        RenderConsentHtml(requestParams, "Too many failed passcode attempts. Please wait 60 seconds and try again."),
-                        "text/html; charset=utf-8",
-                        Encoding.UTF8);
+                    return ConsentHtmlResult(
+                        ctx,
+                        StatusCodes.Status429TooManyRequests,
+                        RenderConsentHtml(requestParams, "Too many failed passcode attempts. Please wait 60 seconds and try again."));
                 }
 
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                return Results.Content(
-                    RenderConsentHtml(requestParams, "Invalid consent passcode. Check Win RTSP Player MCP Settings and try again."),
-                    "text/html; charset=utf-8",
-                    Encoding.UTF8);
+                return ConsentHtmlResult(
+                    ctx,
+                    StatusCodes.Status401Unauthorized,
+                    RenderConsentHtml(requestParams, "Invalid consent passcode. Check Win RTSP Player MCP Settings and try again."));
             }
 
             string code = authStore.CreateAuthCode(
@@ -217,6 +231,14 @@ public static class OAuthEndpoints
 
             return Results.BadRequest(new OAuthErrorResponse("unsupported_grant_type", "Supported grant types are authorization_code and refresh_token."));
         });
+    }
+
+    private static IResult ConsentHtmlResult(HttpContext ctx, int statusCode, string html)
+    {
+        ctx.Response.StatusCode = statusCode;
+        ctx.Response.Headers["X-Frame-Options"] = "DENY";
+        ctx.Response.Headers["Content-Security-Policy"] = "frame-ancestors 'none'";
+        return Results.Content(html, "text/html; charset=utf-8", Encoding.UTF8);
     }
 
     private static AuthorizeParams ReadAuthorizeParams(Func<string, (bool Found, StringValues Value)> lookup)
