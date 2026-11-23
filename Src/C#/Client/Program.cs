@@ -1,22 +1,28 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using System.Windows.Forms;
+﻿using EasyPlayerNetSDK;
 
-namespace Client
+namespace WinRtspPlayer.Client;
+
+internal static class Program
 {
-    static class Program
+    [STAThread]
+    private static void Main()
     {
-        /// <summary>
-        /// 应用程序的主入口点。
-        /// </summary>
-        [STAThread]
-        static void Main()
+        ApplicationConfiguration.Initialize();
+
+        try
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new PlayerForm());
+            NativeDllLoader.ConfigureLibDirectory(AppContext.BaseDirectory);
         }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"Failed to configure native EasyPlayer library directory:\n{ex.Message}",
+                "Win RTSP Player Startup Error",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return;
+        }
+
+        Application.Run(new MainForm());
     }
 }

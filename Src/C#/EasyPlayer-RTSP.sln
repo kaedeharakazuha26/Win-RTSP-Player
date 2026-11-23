@@ -1,6 +1,8 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 11.00
 # Visual Studio 2010
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EasyPlayer-RTSP.Client", "Client\EasyPlayer-RTSP.Client.csproj", "{F90E8981-1B97-42B2-B439-2779F5B57E01}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EasyPlayer-RTSP.NetSDK", "EasyPlayerNetSDK\EasyPlayer-RTSP.NetSDK.csproj", "{4CCDF0E5-EEE4-45A6-A394-0B043B20E569}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinRtspPlayer.Core", "WinRtspPlayer.Core\WinRtspPlayer.Core.csproj", "{4E6DDB6B-095F-4942-B11F-8AA43FC6248C}"
@@ -13,6 +15,10 @@ Global
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F90E8981-1B97-42B2-B439-2779F5B57E01}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F90E8981-1B97-42B2-B439-2779F5B57E01}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F90E8981-1B97-42B2-B439-2779F5B57E01}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F90E8981-1B97-42B2-B439-2779F5B57E01}.Release|Any CPU.Build.0 = Release|Any CPU
 		{4CCDF0E5-EEE4-45A6-A394-0B043B20E569}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{4CCDF0E5-EEE4-45A6-A394-0B043B20E569}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4CCDF0E5-EEE4-45A6-A394-0B043B20E569}.Release|Any CPU.ActiveCfg = Release|Any CPU
