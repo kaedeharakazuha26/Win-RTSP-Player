@@ -19,18 +19,39 @@ This RTSP Windows player is a fork of complete RTSP streaming media player proje
 - [x] Support custom playback layout;
 - [x] The codec, display, and playback source codes are all open and more flexible;
 - [x] Support OSD text watermark;
-- [x] Support real-time video recording and instant picture capture;
 - [x] Detailed log output callback;
 
+## This fork features (.NET 8 + Gemini MCP) ##
 
-## This fork features ##
+- [x] **Multi-camera live RTSP viewer:** Upgraded `.NET 8` (`win-x86`) WinForms player supporting `1`, `4`, `9`, or `16` camera tiles (live feed only — no PC video recording).
+- [x] **Persistent camera configuration across reboots:** Camera links, credentials, and grid layout save automatically to `config/cameras.json` next to `WinRtspPlayer.exe` (passwords encrypted with Windows DPAPI `CurrentUser`), with automatic first-run migration from legacy `rtsp.txt`.
+- [x] **Built-in OAuth 2.1 Streamable HTTP MCP server:** Embedded loopback server (`/mcp` on `127.0.0.1:8765`) for Google Gemini with 6 tools (`list_cameras`, `get_camera_screenshot`, `update_camera`, `add_camera`, `remove_camera`, `control_camera`).
+- [x] **On-demand in-memory JPEG screenshots:** Uses `ffmpeg` in memory (never writes video or images to disk) with automatic brief pause/resume fallback for 1-connection cameras.
+- [x] English UI & auto-playback on startup.
 
-- [x] English Translation
-- [x] Auto playback during startup 
+## Build & Run (.NET 8 App) ##
 
-## Usage ##
+### Prerequisites ###
 
-* Download **7z** file
-* Extract
-* Write down your rtsp streams in **rtsp.txt** file (one per line, with login credentials)
-* Run **win-rtsp-player.exe**
+* [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (to build from source)
+* [FFmpeg](https://ffmpeg.org/) (`ffmpeg.exe` on `PATH` or configured in Settings) for MCP camera screenshots
+
+### Publish & Run ###
+
+```powershell
+dotnet publish Src/C#/Client/EasyPlayer-RTSP.Client.csproj -c Release -r win-x86 --self-contained true -o Bin/WinRtspPlayer
+```
+
+Run `Bin/WinRtspPlayer/WinRtspPlayer.exe`.
+
+> **Important:** Keep the entire `Bin/WinRtspPlayer/` folder intact if you move or copy the app — `WinRtspPlayer.exe` requires `WinRtspPlayer.dll`, the self-contained `.NET 8` runtime DLLs, and the `Lib/` folder in the same directory.
+
+## Run Tests ##
+
+```powershell
+dotnet test Src/C#/WinRtspPlayer.Tests/WinRtspPlayer.Tests.csproj
+```
+
+## Connect Google Gemini (MCP) ##
+
+See [docs/MCP-GEMINI-SETUP.md](docs/MCP-GEMINI-SETUP.md) for step-by-step setup instructions, and use [Src/C#/start-tunnel.bat](Src/C#/start-tunnel.bat) to expose `http://127.0.0.1:8765` over HTTPS via Cloudflare Tunnel.
