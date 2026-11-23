@@ -51,7 +51,3 @@ Run `Bin/WinRtspPlayer/WinRtspPlayer.exe`.
 ```powershell
 dotnet test Src/C#/WinRtspPlayer.Tests/WinRtspPlayer.Tests.csproj
 ```
-
-## Connect Google Gemini (MCP) ##
-
-See [docs/MCP-GEMINI-SETUP.md](docs/MCP-GEMINI-SETUP.md) for step-by-step setup instructions, and use [Src/C#/start-tunnel.bat](Src/C#/start-tunnel.bat) to expose `http://127.0.0.1:8765` over HTTPS via Cloudflare Tunnel.
